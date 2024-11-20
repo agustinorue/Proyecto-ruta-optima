@@ -1,0 +1,632 @@
+```{r}
+library(shiny)
+library(leaflet)
+library(geosphere)
+library(TSP)
+library(dplyr)
+library(visNetwork) 
+
+ui <- fluidPage(
+  titlePanel("Ruta Óptima de Lugares Turísticos en Buenos Aires"),
+  
+  fluidRow(
+    column(12,
+           div(style = "text-align: right; font-size: 18px; margin-bottom: 10px;",
+               textOutput("tiempo_total")
+           )
+    )
+  ),
+  
+  div(
+    style = "position: relative;",
+    leafletOutput("mapa", width = "100%", height = "800px"),
+    absolutePanel(
+      top = 10, right = 10,
+      h4("Velocidad de caminata"),
+      radioButtons("velocidad", "",
+                   choices = list("Lenta (4 km/h)" = "lenta", 
+                                  "Normal (5 km/h)" = "normal", 
+                                  "Rápida (6 km/h)" = "rapida"),
+                   selected = "normal"),
+      style = "background-color: rgba(255, 255, 255, 0.8); 
+              padding: 10px; border-radius: 5px;"
+    )
+  ),
+  
+  hr(),
+  h3("Grafo de Tiempos entre Puntos Seleccionados"),
+  visNetworkOutput("grafo", height = "600px")  
+)
+
+server <- function(input, output, session) {
+  
+  lugares <- data.frame(
+    nombre = c("Ateneo Grand Splendid", "Teatro Colón",
+               "Obelisco", "Galerías Pacífico", "Casa Rosada",
+               "Puente de la Mujer", "Usina del Arte", "Mercado San Telmo",
+               "Parque Lezama", "Caminito",
+               "Plaza San Martín", "Basílica del Santísimo Sacramento",
+               "Museo Histórico Nacional", "Reserva Ecológica Costanera Sur",
+               "La Boca Stadium", "Café Tortoni", "El Establo Parrilla",
+               "La Estancia", "Restaurante Palacio Español", "Tanta",
+               "El Obrero", "Il Matterello", "Siga la Vaca"),
+    latitud = c(-34.59531167372355, -34.60103533130145,
+                -34.60371614155903, -34.59894499049557, -34.608034642019916,
+                -34.607948277461475, -34.628562098094974, -34.61817104739925,
+                -34.6263457661029, -34.63927754396555,
+                -34.59426390245992, -34.59631912702152,
+                -34.62210090124298, -34.61121720914151,
+                -34.63598246713049, -34.608080, -34.599800,
+                -34.602500, -34.609000, -34.603000,
+                -34.6345, -34.6340, -34.6170),
+    longitud = c(-58.39447026605091, -58.38344396567338,
+                 -58.38159565957464, -58.374886402313514, -58.37005566462624,
+                 -58.36518266988564, -58.357066925191994, -58.372641793475935,
+                 -58.369581855902624, -58.36271515506943,
+                 -58.37484813498793, -58.37432652287875,
+                 -58.37001901589525, -58.36036191742029,
+                 -58.36334932910767, -58.378800, -58.374200,
+                 -58.382000, -58.383000, -58.378000,
+                 -58.3640, -58.3645, -58.3620),
+    tipo = c(rep("turistico", 15), rep("restaurante", 8)),
+    stringsAsFactors = FALSE
+  )
+  
+  getIcon <- function(lugar) {
+    if (lugar$tipo == 'restaurante') {
+      icon_name <- 'cutlery'
+      marker_color <- 'green'
+    } else if (lugar$tipo == 'turistico') {
+      icon_name <- 'camera'
+      marker_color <- 'blue'
+    } else {
+      icon_name <- 'user'
+      marker_color <- 'red'
+    }
+    
+    icono <- makeAwesomeIcon(
+      icon = icon_name,
+      markerColor = marker_color,
+      iconColor = 'white',
+      library = 'fa'
+    )
+    
+    return(icono)
+  }
+  
+  ubicacion_usuario <- reactiveValues(
+    nombre = "Ubicación del Usuario",
+    latitud = -34.6322,
+    longitud = -58.3686
+  )
+  
+  selected_markers <- reactiveValues(
+    selected = character(0)  
+  )
+  
+  lugares_reactivos <- reactive({
+    ubicacion_df <- data.frame(
+      nombre = ubicacion_usuario$nombre,
+      latitud = ubicacion_usuario$latitud,
+      longitud = ubicacion_usuario$longitud,
+      tipo = "usuario",
+      stringsAsFactors = FALSE
+    )
+    lugares_seleccionados <- lugares %>%
+      filter(nombre %in% selected_markers$selected)
+    lugares_totales <- rbind(ubicacion_df, lugares_seleccionados)
+    return(lugares_totales)
+  })
+  
+  ruta_optima <- reactive({
+    lugares_df <- lugares_reactivos()
+    
+    if (nrow(lugares_df) < 2) {
+      return(list(
+        lugares_ordenados = lugares_df,
+        distancia_total = 0
+      ))
+    }
+    
+    coords <- as.matrix(lugares_df[, c("longitud", "latitud")])
+    
+    dist_matrix <- distm(coords, fun = distHaversine)
+    
+    dist_matrix_km <- dist_matrix / 1000 
+    
+    rownames(dist_matrix_km) <- colnames(dist_matrix_km) <- lugares_df$nombre
+    
+    tsp_instance <- TSP(dist_matrix_km)
+    
+    initial_tour <- solve_TSP(tsp_instance, method = "nearest_insertion", start = 1)
+    
+    optimal_tour <- solve_TSP(tsp_instance, method = "two_opt", control = list(tour = initial_tour))
+    
+    ruta_indices <- as.integer(optimal_tour)
+    
+    lugares_ordenados <- lugares_df[ruta_indices, ]
+    
+    distancia_total <- tour_length(optimal_tour)
+    
+    list(
+      lugares_ordenados = lugares_ordenados,
+      distancia_total = distancia_total
+    )
+  })
+  
+  lugares_con_seleccion <- reactive({
+    lugares %>%
+      mutate(selected = nombre %in% selected_markers$selected)
+  })
+  
+  output$tiempo_total <- renderText({
+    ruta <- ruta_optima()
+    distancia_total <- ruta$distancia_total  
+    
+    velocidad_seleccionada <- switch(input$velocidad,
+                                     "lenta" = 4,   
+                                     "normal" = 5, 
+                                     "rapida" = 6)  
+    
+    tiempo_total_horas <- distancia_total / velocidad_seleccionada
+    
+    if (distancia_total == 0) {
+      return("Selecciona al menos un lugar para calcular el tiempo estimado.")
+    }
+    
+    horas <- floor(tiempo_total_horas)
+    minutos <- round((tiempo_total_horas - horas) * 60)
+    
+    tiempo_formateado <- paste0("Tiempo total estimado: ", horas, " horas y ", minutos, " minutos")
+    
+    return(tiempo_formateado)
+  })
+  
+  output$mapa <- renderLeaflet({
+    lugares_df <- lugares_con_seleccion()
+    
+    mapa <- leaflet() %>%
+      addTiles() %>%
+      setView(lng = mean(lugares$longitud), lat = mean(lugares$latitud), zoom = 13)
+    
+    for (i in 1:nrow(lugares_df)) {
+      lugar <- lugares_df[i, ]
+      icono <- getIcon(lugar)
+      
+      opacity <- if (lugar$selected) 1 else 0.5  
+    
+      mapa <- mapa %>%
+        addAwesomeMarkers(
+          lng = lugar$longitud,
+          lat = lugar$latitud,
+          label = lugar$nombre,
+          layerId = lugar$nombre,
+          icon = icono,
+          options = markerOptions(opacity = opacity)
+        )
+    }
+    
+    mapa <- mapa %>%
+      addAwesomeMarkers(
+        lng = ubicacion_usuario$longitud, lat = ubicacion_usuario$latitud,
+        label = ubicacion_usuario$nombre,
+        layerId = "usuario",
+        options = markerOptions(draggable = TRUE),
+        icon = awesomeIcons(
+          icon = 'user',
+          iconColor = 'white',
+          markerColor = 'red',
+          library = 'fa'
+        )
+      )
+    
+    ruta <- ruta_optima()
+    lugares_ordenados <- ruta$lugares_ordenados
+    if (nrow(lugares_ordenados) >= 2) {
+      lugares_ordenados <- rbind(lugares_ordenados, lugares_ordenados[1, ])
+      mapa <- mapa %>%
+        addPolylines(
+          lng = lugares_ordenados$longitud,
+          lat = lugares_ordenados$latitud,
+          color = "blue",
+          weight = 3,
+          opacity = 1,
+          layerId = "ruta"
+        )
+    }
+    
+    return(mapa)
+  })
+  
+  observeEvent(input$mapa_marker_dragend, {
+    evento <- input$mapa_marker_dragend
+    if (evento$id == "usuario") {
+      ubicacion_usuario$latitud <- evento$lat
+      ubicacion_usuario$longitud <- evento$lng
+    
+      ruta <- ruta_optima()
+      lugares_ordenados <- ruta$lugares_ordenados
+    
+      if (nrow(lugares_ordenados) >= 2) {
+        lugares_ordenados <- rbind(lugares_ordenados, lugares_ordenados[1, ])
+        leafletProxy("mapa") %>%
+          removeShape(layerId = "ruta") %>%
+          addPolylines(
+            lng = lugares_ordenados$longitud,
+            lat = lugares_ordenados$latitud,
+            color = "blue",
+            weight = 3,
+            opacity = 1,
+            layerId = "ruta"
+          )
+      } else {
+        leafletProxy("mapa") %>%
+          removeShape(layerId = "ruta")
+      }
+    }
+  })
+  
+  observeEvent(input$mapa_marker_click, {
+    evento <- input$mapa_marker_click
+    id <- evento$id
+    
+    if (id != "usuario") {
+      if (id %in% selected_markers$selected) {
+        selected_markers$selected <- setdiff(selected_markers$selected, id)
+      } else {
+        selected_markers$selected <- c(selected_markers$selected, id)
+      }
+      
+      ruta <- ruta_optima()
+      lugares_ordenados <- ruta$lugares_ordenados
+      
+      if (nrow(lugares_ordenados) >= 2) {
+        lugares_ordenados <- rbind(lugares_ordenados, lugares_ordenados[1, ])
+        leafletProxy("mapa") %>%
+          removeShape(layerId = "ruta") %>%
+          addPolylines(
+            lng = lugares_ordenados$longitud,
+            lat = lugares_ordenados$latitud,
+            color = "blue",
+            weight = 3,
+            opacity = 1,
+            layerId = "ruta"
+          )
+      } else {
+        leafletProxy("mapa") %>%
+          removeShape(layerId = "ruta")
+      }
+      
+      lugares_df <- lugares_con_seleccion()
+      
+      leafletProxy("mapa") %>%
+        removeMarker(layerId = lugares$nombre)
+      
+      for (i in 1:nrow(lugares_df)) {
+        lugar <- lugares_df[i, ]
+        icono <- getIcon(lugar)
+        
+        opacity <- if (lugar$selected) 1 else 0.5
+        
+        leafletProxy("mapa") %>%
+          addAwesomeMarkers(
+            lng = lugar$longitud,
+            lat = lugar$latitud,
+            label = lugar$nombre,
+            layerId = lugar$nombre,
+            icon = icono,
+            options = markerOptions(opacity = opacity)
+          )
+      }
+    }
+  })
+  
+  velocidad_kmh <- reactive({
+    switch(input$velocidad,
+           "lenta" = 4,
+           "normal" = 5,
+           "rapida" = 6)
+  })
+  
+  tiempos_entre_puntos <- reactive({
+    lugares_df <- lugares_reactivos()
+    if (nrow(lugares_df) < 2) {
+      return(NULL)
+    }
+    
+    coords <- as.matrix(lugares_df[, c("longitud", "latitud")])
+    
+    dist_matrix <- distm(coords, fun = distHaversine)
+    
+    dist_matrix_km <- dist_matrix / 1000  
+    velocidad <- velocidad_kmh()
+    
+    tiempo_matrix_min <- (dist_matrix_km / velocidad) * 60  
+    
+    edges <- data.frame()
+    for (i in 1:(nrow(lugares_df) - 1)) {
+      for (j in (i + 1):nrow(lugares_df)) {
+        edges <- rbind(edges, data.frame(
+          from = lugares_df$nombre[i],
+          to = lugares_df$nombre[j],
+          tiempo = round(tiempo_matrix_min[i, j], 1),
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+    return(edges)
+  })
+  
+  output$grafo <- renderVisNetwork({
+    lugares_df <- lugares_reactivos()
+    if (nrow(lugares_df) < 2) {
+      return(NULL)
+    }
+    
+    edges <- tiempos_entre_puntos()
+    if (is.null(edges)) {
+      return(NULL)
+    }
+    
+    nodes <- data.frame(id = lugares_df$nombre, label = lugares_df$nombre, stringsAsFactors = FALSE)
+    
+    edges <- edges %>%
+      mutate(label = paste0(tiempo, " min"),
+             arrows = "none",
+             font.size = 10,
+             color = "black")
+    
+    visNetwork(nodes, edges) %>%
+      visEdges(smooth = FALSE) %>%
+      visOptions(highlightNearest = TRUE, nodesIdSelection = TRUE) %>%
+      visLayout(
+        hierarchical = FALSE,
+        randomSeed = 123,
+        improvedLayout = TRUE
+      ) %>%
+      visPhysics(
+        repulsion = list(
+          centralGravity = 0.2,
+          springLength = 300,
+          springConstant = 0.05
+        ),
+        stabilization = FALSE  
+      ) %>%
+      visNodes(
+        font = list(size = 14, align = "center"),
+        shape = "dot",
+        size = 25
+      ) %>%
+      visInteraction(
+        tooltipDelay = 0,
+        hideEdgesOnDrag = FALSE
+      ) %>%
+      visPhysics(stabilization = FALSE)  
+  })
+  
+}
+
+shinyApp(ui = ui, server = server)
+
+```
+
+```{r}
+
+
+rm(list = ls())
+
+
+packages <- c("geosphere", "visNetwork", "htmlwidgets")
+installed_packages <- rownames(installed.packages())
+
+for (pkg in packages) {
+  if (!(pkg %in% installed_packages)) {
+    install.packages(pkg, dependencies = TRUE)
+  }
+  library(pkg, character.only = TRUE)
+}
+
+
+lugares <- data.frame(
+  nombre = c("Ateneo Grand Splendid", "Teatro Colón",
+             "Obelisco", "Galerías Pacífico", "Casa Rosada",
+             "Puente de la Mujer", "Usina del Arte", "Mercado San Telmo",
+             "Parque Lezama", "Caminito",
+             "Plaza San Martín", "Basílica del Santísimo Sacramento",
+             "Museo Histórico Nacional", "Reserva Ecológica Costanera Sur",
+             "La Boca Stadium", "Café Tortoni", "El Establo Parrilla",
+             "La Estancia", "Restaurante Palacio Español", "Tanta",
+             "El Obrero", "Il Matterello", "Siga la Vaca"),
+  latitud = c(-34.59531167372355, -34.60103533130145,
+              -34.60371614155903, -34.59894499049557, -34.608034642019916,
+              -34.607948277461475, -34.628562098094974, -34.61817104739925,
+              -34.6263457661029, -34.63927754396555,
+              -34.59426390245992, -34.59631912702152,
+              -34.62210090124298, -34.61121720914151,
+              -34.63598246713049, -34.608080, -34.599800,
+              -34.602500, -34.609000, -34.603000,
+              -34.6345, -34.6340, -34.6170),
+  longitud = c(-58.39447026605091, -58.38344396567338,
+               -58.38159565957464, -58.374886402313514, -58.37005566462624,
+               -58.36518266988564, -58.357066925191994, -58.372641793475935,
+               -58.369581855902624, -58.36271515506943,
+               -58.37484813498793, -58.37432652287875,
+               -58.37001901589525, -58.36036191742029,
+               -58.36334932910767, -58.378800, -58.374200,
+               -58.382000, -58.383000, -58.378000,
+               -58.3640, -58.3645, -58.3620),
+  tipo = c(rep("turistico", 15), rep("restaurante", 8)),
+  stringsAsFactors = FALSE
+)
+
+retiro <- data.frame(
+  nombre = "Retiro",
+  latitud = -34.558,       # Ajusta si es necesario
+  longitud = -58.417,      # Ajusta si es necesario
+  tipo = "turistico",
+  stringsAsFactors = FALSE
+)
+
+lugares <- rbind(lugares, retiro)
+
+print("DataFrame 'lugares' actualizado:")
+print(lugares)
+
+
+coords <- as.matrix(lugares[, c("longitud", "latitud")])
+
+dist_matrix_m <- distm(coords, fun = distHaversine)
+
+dist_matrix_km <- dist_matrix_m / 1000
+
+
+velocidad_kmh <- 40  # Puedes ajustar este valor
+
+tiempo_horas <- dist_matrix_km / velocidad_kmh
+
+tiempo_minutos <- tiempo_horas * 60
+
+
+nodos <- data.frame(
+  id = 1:nrow(lugares),
+  label = lugares$nombre,
+  title = paste("<p><b>", lugares$nombre, "</b><br/>Tipo: ", lugares$tipo, "</p>", sep = ""),
+  group = lugares$tipo,
+  stringsAsFactors = FALSE
+)
+
+
+aristas <- data.frame(
+  from = integer(),
+  to = integer(),
+  title = character(),
+  label = character(),
+  stringsAsFactors = FALSE
+)
+
+for(i in 1:(nrow(lugares)-1)) {
+  for(j in (i+1):nrow(lugares)) {
+    aristas <- rbind(aristas, data.frame(
+      from = i,
+      to = j,
+      title = paste("Tiempo de viaje:", round(tiempo_minutos[i, j], 2), "minutos"),
+      label = paste(round(tiempo_minutos[i, j], 2), "min"),
+      stringsAsFactors = FALSE
+    ))
+  }
+}
+
+colores <- c("turistico" = "#1f78b4", "restaurante" = "#33a02c")
+
+grafo <- visNetwork(nodos, aristas, 
+                    width = "1500px", height = "1500px") %>%
+  visOptions(highlightNearest = TRUE, 
+             nodesIdSelection = TRUE) %>%
+  visGroups(groupname = "turistico", color = colores["turistico"]) %>%
+  visGroups(groupname = "restaurante", color = colores["restaurante"]) %>%
+  visLegend(position = "right", useGroups = TRUE) %>%
+  visEdges(
+    smooth = FALSE,
+    font = list(
+      size = 14,     
+      align = "middle"
+    ),
+    color = list(
+      color = "#848484",
+      highlight = "#ff0000"
+    )
+  ) %>%
+  visNodes(
+    scaling = list(
+      label = list(enabled = TRUE, min = 10, max = 20)
+    ),
+    font = list(size = 20)  
+  ) %>%
+  visPhysics(
+    stabilization = FALSE,
+    barnesHut = list(
+      gravitationalConstant = -20000,
+      centralGravity = 0.3,
+      springLength = 300,
+      springConstant = 0.04,
+      damping = 0.09
+    )
+  ) %>%
+  visLayout(
+    improvedLayout = TRUE,
+    hierarchical = FALSE
+  ) %>%
+  visInteraction(
+    navigationButtons = TRUE,
+    zoomView = TRUE,
+    dragNodes = TRUE,
+    dragView = TRUE,
+    hideEdgesOnDrag = FALSE
+  )
+
+
+grafo
+
+visSave(grafo, file = "grafo_lugares_interactivo.html")
+
+print("Grafo interactivo generado exitosamente y guardado como 'grafo_lugares_interactivo.html'.")
+
+```
+
+```{r}
+
+library(leaflet)
+
+
+lugares <- data.frame(
+  nombre = c("Ateneo Grand Splendid", "Teatro Colón",
+             "Obelisco", "Galerías Pacífico", "Casa Rosada",
+             "Puente de la Mujer", "Usina del Arte", "Mercado San Telmo",
+             "Parque Lezama", "Caminito",
+             "Plaza San Martín", "Basílica del Santísimo Sacramento",
+             "Museo Histórico Nacional", "Reserva Ecológica Costanera Sur",
+             "La Boca Stadium", "Café Tortoni", "El Establo Parrilla",
+             "La Estancia", "Restaurante Palacio Español", "Tanta",
+             "El Obrero", "Il Matterello", "Siga la Vaca", "Retiro"),
+  latitud = c(-34.59531167372355, -34.60103533130145,
+              -34.60371614155903, -34.59894499049557, -34.608034642019916,
+              -34.607948277461475, -34.628562098094974, -34.61817104739925,
+              -34.6263457661029, -34.63927754396555,
+              -34.59426390245992, -34.59631912702152,
+              -34.62210090124298, -34.61121720914151,
+              -34.63598246713049, -34.608080, -34.599800,
+              -34.602500, -34.609000, -34.603000,
+              -34.6345, -34.6340, -34.6170, -34.5926), 
+  longitud = c(-58.39447026605091, -58.38344396567338,
+               -58.38159565957464, -58.374886402313514, -58.37005566462624,
+               -58.36518266988564, -58.357066925191994, -58.372641793475935,
+               -58.369581855902624, -58.36271515506943,
+               -58.37484813498793, -58.37432652287875,
+               -58.37001901589525, -58.36036191742029,
+               -58.36334932910767, -58.378800, -58.374200,
+               -58.382000, -58.383000, -58.378000,
+               -58.3640, -58.3645, -58.3620, -58.3752)
+
+
+iconos <- awesomeIcons(
+  icon = 'circle',        
+  iconColor = 'white',      
+  library = 'glyphicon',     
+  markerColor = ifelse(lugares$nombre == "Retiro", "red", "blue") 
+)
+
+
+mapa <- leaflet(lugares) %>%
+  addTiles() %>%  
+  addAwesomeMarkers(
+    lng = ~longitud, lat = ~latitud,
+    label = ~nombre,
+    icon = iconos,    
+    popup = ~nombre
+  ) %>%
+  setView(lng = mean(lugares$longitud), lat = mean(lugares$latitud), zoom = 13)  
+
+
+mapa
+
+```
